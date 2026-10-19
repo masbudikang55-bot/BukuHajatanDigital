@@ -1369,23 +1369,36 @@ async function handleImportFile(file) {
       return;
     }
     if (total > 2000) { toast('Maksimal 2000 baris per import.', 'err'); return; }
-    // buang baris yang sama persis dengan data yang sudah ada atau baris kembar di dalam file
-    const items = []; let skipped = 0;
+    // pisahkan baris unik dan baris ganda (sama persis dengan data yang sudah ada atau baris kembar di dalam file)
+    const items = [], dups = [];
     ['putra', 'putri'].forEach(j => {
       if (!buckets[j].length) return;
-      const seen = new Set(state.lists[j].map(guestSig)), uniq = [];
-      buckets[j].forEach(r => { if (j === 'putra') r.kado = ''; const s = guestSig(r); if (!seen.has(s)) { seen.add(s); uniq.push(r); } else skipped++; });
+      const seen = new Map(state.lists[j].map(r => [guestSig(r), r.id])), uniq = [];
+      buckets[j].forEach(r => {
+        if (j === 'putra') r.kado = '';
+        const sg = guestSig(r);
+        if (!seen.has(sg)) { seen.set(sg, 'baris sebelumnya di file'); uniq.push(r); }
+        else dups.push({ jenis: j, row: r, ref: seen.get(sg) });
+      });
       if (uniq.length) items.push({ jenis: j, rows: uniq });
     });
-    if (!items.length) { toast('Semua ' + total + ' baris sama persis dengan data yang sudah ada. Tidak ada yang diimport.', 'err'); return; }
-    state.pendingImport = { items: items };
+    state.pendingImport = { items: items, dups: dups };
     const sum = items.map(it => '<li>Tamu ' + (it.jenis === 'putri' ? 'Putri' : 'Putra') + ': <b>' + it.rows.length + ' tamu</b> (contoh: ' + esc(it.rows[0].nama) + ', ' + rp(it.rows[0].kas) + ')</li>').join('');
-    openModal('<h3>Konfirmasi Import</h3><p>Mode: <b>' + IMP_LABEL[which] + '</b></p><ul style="margin:8px 0 8px 18px;padding:0;font-size:14px;line-height:1.7">' + sum + '</ul>' +
-      (skipped ? '<p style="color:#92400e;font-size:13px">' + skipped + ' baris data ganda dilewati.</p>' : '') +
+    const dupHtml = dups.length
+      ? '<div class="note y" style="margin:10px 0 6px"><b>' + dups.length + ' data ganda</b> ditemukan (semua kolom sama persis). Pilih <b>Setujui</b> untuk tetap mengimport, atau <b>Lewati</b> untuk membuangnya.</div>' +
+        '<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap"><button type="button" class="btn btn-light btn-sm" data-act="dup-all" data-v="skip">Lewati Semua</button><button type="button" class="btn btn-light btn-sm" data-act="dup-all" data-v="ok">Setujui Semua</button></div>' +
+        '<div style="max-height:34vh;overflow-y:auto;border:1px solid #e5e7eb;border-radius:12px;background:rgba(255,255,255,.7)">' +
+        dups.map((d, i) => '<div style="display:flex;gap:10px;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px dashed #e5e7eb;font-size:13px">' +
+          '<div style="min-width:0"><b>' + esc(d.row.nama) + '</b> <span class="badge b-n">' + (d.jenis === 'putri' ? 'Putri' : 'Putra') + '</span><br><small style="color:#6b7280;overflow-wrap:anywhere">' + esc(plainAlamat(d.row.alamat) || '-') + ' | ' + rp(d.row.kas) + (d.row.kado ? ' | ' + esc(d.row.kado) : '') + (d.row.catatan ? ' | ' + esc(d.row.catatan) : '') + '<br>Sama dengan: ' + esc(d.ref) + '</small></div>' +
+          '<select data-dup="' + i + '" style="padding:6px;border-radius:8px;border:1.5px solid #e5e7eb;font-size:13px;flex:none"><option value="skip" selected>Lewati</option><option value="ok">Setujui</option></select></div>').join('') + '</div>'
+      : '';
+    openModal('<h3>Konfirmasi Import</h3><p>Mode: <b>' + IMP_LABEL[which] + '</b></p>' +
+      (sum ? '<ul style="margin:8px 0 8px 18px;padding:0;font-size:14px;line-height:1.7">' + sum + '</ul>' : '<p class="hint">Tidak ada data baru, semua baris adalah data ganda.</p>') +
+      dupHtml +
       (other ? '<p style="color:#92400e;font-size:13px">' + other + ' baris jenis lain dilewati (tidak sesuai pilihan).</p>' : '') +
       (noJenis ? '<p style="color:#92400e;font-size:13px">' + noJenis + ' baris tanpa keterangan jenis dilewati.</p>' : '') +
       '<p class="hint">Nilai kas di bawah 1.000 dianggap ribuan (50 menjadi 50.000). Import dikirim bertahap, tunggu sampai selesai.</p>' +
-      '<div class="m-act"><button class="btn btn-light" data-act="close-modal">Batal</button><button class="btn btn-green" data-act="do-import">Import Sekarang</button></div>');
+      '<div class="m-act"><button class="btn btn-light" data-act="close-modal">Batal</button><button class="btn btn-green" data-act="do-import">Import Sekarang</button></div>', true);
   } catch (e) { toast(errMsg(e), 'err'); }
 }
 
@@ -1689,16 +1702,25 @@ const acts = {
     state.importJenis = $('#imp-jenis').value;
     const f = $('#file-import'); f.value = ''; f.click();
   },
+  'dup-all': el => { $$('#modal-layer select[data-dup]').forEach(x => { x.value = el.dataset.v; }); },
   'do-import': async el => {
     const pi = state.pendingImport; if (!pi) return;
-    const all = pi.items.reduce((a, i) => a + i.rows.length, 0); let base = 0, n = 0;
+    // gabungkan baris unik + baris ganda yang disetujui
+    const rowsBy = { putra: [], putri: [] };
+    pi.items.forEach(it => rowsBy[it.jenis] = rowsBy[it.jenis].concat(it.rows));
+    let approved = 0;
+    $$('#modal-layer select[data-dup]').forEach(x => { if (x.value === 'ok') { const d = pi.dups[Number(x.dataset.dup)]; if (d) { rowsBy[d.jenis].push(d.row); approved++; } } });
+    const run = ['putra', 'putri'].filter(j => rowsBy[j].length).map(j => ({ jenis: j, rows: rowsBy[j] }));
+    if (!run.length) { state.pendingImport = null; closeModal(); toast('Semua data ganda dilewati. Tidak ada yang diimport.'); return; }
+    const all = run.reduce((a, i) => a + i.rows.length, 0); let base = 0, n = 0;
     el.disabled = true; el.innerHTML = '<span class="spin"></span> Mengimpor...';
     try {
-      for (const it of pi.items) {
+      for (const it of run) {
         n += await B.importGuests(it.jenis, state.s.uid, it.rows, state.lists[it.jenis], d => { el.innerHTML = '<span class="spin"></span> ' + (base + d) + ' / ' + all; });
         base += it.rows.length;
       }
-      state.pendingImport = null; closeModal(); toast(n + ' data berhasil diimport.', 'ok');
+      const skipped = pi.dups.length - approved;
+      state.pendingImport = null; closeModal(); toast(n + ' data berhasil diimport' + (pi.dups.length ? ' (' + approved + ' ganda disetujui, ' + skipped + ' dilewati)' : '') + '.', 'ok');
     } catch (e) {
       if (n > 0) { state.pendingImport = null; closeModal(); toast(errMsg(e) + ' (' + n + ' data sudah masuk, import dihentikan)', 'err'); }
       else { el.disabled = false; el.textContent = 'Import Sekarang'; toast(errMsg(e), 'err'); }
